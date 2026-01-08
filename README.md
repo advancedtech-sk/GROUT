@@ -2,6 +2,7 @@
 
 ### Zero-Shot Semantic Segmentation of Mosaic Surfaces via Synthetic Priors
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18187264.svg)](https://doi.org/10.5281/zenodo.18187264)
 [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/advancedtech-sk/GROUT)
 [![Hugging Face Model](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-yellow)](https://huggingface.co/advancedtech-sk/GROUT)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
@@ -180,8 +181,9 @@ If you use GROUT in your research, please cite:
   author = {Lovecky, Radoslav},
   title = {GROUT: Geometric Reasoning Over Unstructured Tessellations},
   year = {2026},
-  publisher = {GitHub},
-  url = {https://github.com/advancedtech-sk/GROUT}
+  publisher = {Zenodo},
+  doi = {10.5281/zenodo.18187264},
+  url = {https://doi.org/10.5281/zenodo.18187264}
 }
 ```
 
@@ -191,6 +193,7 @@ MIT License - see [LICENSE](LICENSE) file.
 
 ## Links
 
+- [Paper (Zenodo)](https://zenodo.org/records/18187265)
 - [Hugging Face Space (Demo)](https://huggingface.co/spaces/advancedtech-sk/GROUT)
 - [Hugging Face Model](https://huggingface.co/advancedtech-sk/GROUT)
 - [GitHub Repository](https://github.com/advancedtech-sk/GROUT)
