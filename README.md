@@ -11,6 +11,9 @@
 
 **Author:** Radoslav Lovecky, Institute of Advanced Technologies, Slovakia
 
+![GROUT Sample](GROUT_sample.png)
+*Example: Input mosaic image → Detected grout lines (overlay) → Binary mask*
+
 ## 🌟 Overview
 
 Precise segmentation of tessellated surfaces is a challenge for cultural heritage documentation. GROUT overcomes the scarcity of annotated data by training on synthetic geometric priors. It generalizes to real-world Roman, Byzantine, and Modern mosaics without seeing a single real image during training.
@@ -173,10 +176,10 @@ python export_model.py --checkpoint checkpoints/best_model.pth --output exports/
 If you use GROUT in your research, please cite:
 
 ```bibtex
-@software{grout2025,
+@software{grout2026,
   author = {Lovecky, Radoslav},
   title = {GROUT: Geometric Reasoning Over Unstructured Tessellations},
-  year = {2025},
+  year = {2026},
   publisher = {GitHub},
   url = {https://github.com/advancedtech-sk/GROUT}
 }
