@@ -197,3 +197,4 @@ MIT License - see [LICENSE](LICENSE) file.
 - [Hugging Face Space (Demo)](https://huggingface.co/spaces/advancedtech-sk/GROUT)
 - [Hugging Face Model](https://huggingface.co/advancedtech-sk/GROUT)
 - [GitHub Repository](https://github.com/advancedtech-sk/GROUT)
+- [ComfyUI custom node Repository](https://github.com/advancedtech-sk/ComfyUI-GROUT)
