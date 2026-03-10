@@ -10,7 +10,7 @@
 
 **GROUT** is a deep learning model for detecting and segmenting grout lines (mortar joints) in mosaic images. The model uses a U-Net architecture with an EfficientNet-B3 encoder, trained **exclusively on procedurally generated synthetic data** to achieve zero-shot transfer to real-world mosaics.
 
-**Author:** Radoslav Lovecky, Institute of Advanced Technologies, Slovakia
+**Author:** Radoslav Lovecky, Arperon s.r.o., Institute of Advanced Technologies, Slovakia
 
 ![GROUT Sample](GROUT_sample.png)
 *Example: Input mosaic image → Detected grout lines (overlay) → Binary mask*
