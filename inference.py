@@ -11,7 +11,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-import onnxruntime as ort
+try:  # optional: only needed for the ONNX path
+    import onnxruntime as ort
+except ImportError:
+    ort = None
 
 from config import Config
 from model import build_model, load_checkpoint
@@ -33,6 +36,7 @@ class GroutSegmenter:
         model_path: str,
         device: str = 'cuda',
         use_onnx: bool = False,
+        temperature: Optional[float] = None,
     ):
         """
         Initialize segmentation model.
@@ -41,7 +45,13 @@ class GroutSegmenter:
             model_path: Path to model checkpoint (.pth) or ONNX model (.onnx)
             device: Device to run inference on
             use_onnx: Whether to use ONNX runtime
+            temperature: Calibration temperature (sigmoid(logits/T)). None ->
+                resolve from calibration.json (model dir, then cwd), else 1.0.
         """
+        from calibrate import resolve_temperature
+        self.temperature = resolve_temperature(temperature, model_path)
+        if self.temperature != 1.0:
+            print(f"Calibration: temperature T = {self.temperature:.4f}")
         # Verify device is actually available and PyTorch is CUDA-enabled
         if device == 'cuda':
             try:
@@ -57,6 +67,9 @@ class GroutSegmenter:
         self.use_onnx = use_onnx or model_path.endswith('.onnx')
 
         if self.use_onnx:
+            if ort is None:
+                raise ImportError("onnxruntime is required for ONNX models: "
+                                  "pip install onnxruntime")
             print(f"Loading ONNX model from {model_path}")
             self.session = ort.InferenceSession(
                 model_path,
@@ -111,10 +124,15 @@ class GroutSegmenter:
             output = self.model(input_tensor)
             output = output.cpu()
 
-        # Apply sigmoid to get probabilities
-        prob = torch.sigmoid(output).squeeze().numpy()
+        # Apply (temperature-scaled) sigmoid to get probabilities.
+        # T = 1.0 is exactly torch.sigmoid(output); any T > 0 preserves
+        # per-pixel ranking. Kept float32 throughout.
+        prob = torch.sigmoid(output / self.temperature).squeeze().numpy()
+        prob = prob.astype(np.float32)
 
         # Threshold to binary mask
+        # INVARIANT STAGE: (prob > threshold) here is the native-grid raw
+        # mask that the exported _prob map reproduces bit-exactly.
         binary_mask = (prob > Config.PREDICTION_THRESHOLD).astype(np.uint8) * 255
 
         # Post-process
@@ -228,12 +246,35 @@ class GroutSegmenter:
         return image
 
 
+def _tta_variants(n: int):
+    """First n of 8 dihedral (flip/rot90) transforms as (forward, inverse)
+    pairs operating on HxW[xC] numpy arrays."""
+    ident = (lambda x: x, lambda x: x)
+    variants = [
+        ident,
+        (lambda x: x[:, ::-1], lambda x: x[:, ::-1]),                    # hflip
+        (lambda x: x[::-1, :], lambda x: x[::-1, :]),                    # vflip
+        (lambda x: np.rot90(x, 1), lambda x: np.rot90(x, -1)),           # rot90
+        (lambda x: np.rot90(x, 2), lambda x: np.rot90(x, -2)),           # rot180
+        (lambda x: np.rot90(x, 3), lambda x: np.rot90(x, -3)),           # rot270
+        (lambda x: np.rot90(x[:, ::-1], 1),
+         lambda x: np.rot90(x, -1)[:, ::-1]),                            # hflip+rot90
+        (lambda x: np.rot90(x[::-1, :], 1),
+         lambda x: np.rot90(x, -1)[::-1, :]),                            # vflip+rot90
+    ]
+    return variants[:max(2, min(n, 8))]
+
+
 def inference_single_image(
     image_path: str,
     model_path: str,
     output_dir: str,
     device: str = 'cuda',
     visualize: bool = True,
+    save_prob: bool = True,
+    temperature: Optional[float] = None,
+    tta_var: int = 0,
+    segmenter: Optional['GroutSegmenter'] = None,
 ):
     """
     Run inference on a single image.
@@ -244,7 +285,16 @@ def inference_single_image(
         output_dir: Directory to save results
         device: Device to run on
         visualize: Whether to create visualizations
+        save_prob: Export the pre-threshold confidence map
+            (_prob.npy float32 + _prob8.png) at the native inference grid
+        temperature: Calibration temperature (None -> calibration.json or 1.0)
+        tta_var: If > 0, run N flip/rot90 passes and export a per-pixel
+            variance map (_var.npy + _var8.png). The shipped mask still comes
+            from the plain pass (unchanged outputs).
+        segmenter: Optional pre-loaded GroutSegmenter (avoids reloading)
     """
+    from prob_output import save_prob_outputs, save_var_outputs
+
     # Create output directory
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
@@ -257,28 +307,61 @@ def inference_single_image(
     print(f"Loaded image: {image.shape}")
 
     # Initialize segmenter
-    segmenter = GroutSegmenter(model_path, device)
+    if segmenter is None:
+        segmenter = GroutSegmenter(model_path, device, temperature=temperature)
 
     # Predict
     print("Running inference...")
     original_size = image.shape[:2]
+    image_name = Path(image_path).stem
 
     if max(original_size) > Config.IMG_SIZE:
         # Use sliding window for large images
         prob, pred_mask = segmenter.predict_large_image(image)
+        # native grid == full resolution here
+        prob_native = prob
+        native_input = image
+        use_sliding = True
     else:
         # Resize for inference
         image_resized = cv2.resize(image, (Config.IMG_SIZE, Config.IMG_SIZE))
         prob, pred_mask = segmenter.predict(image_resized)
+        prob_native = prob                     # native grid == IMG_SIZE
+        native_input = image_resized
+        use_sliding = False
 
-        # Resize back to original size
+        # Resize back to original size (existing shipped behavior, unchanged:
+        # bilinear on both; the mask therefore leaves the strictly-binary
+        # domain at this stage -- see README pipeline-order note)
         prob = cv2.resize(prob, (original_size[1], original_size[0]))
         pred_mask = cv2.resize(pred_mask, (original_size[1], original_size[0]))
 
-    print("Inference complete!")
+    # Soft output: canonical float32 at the NATIVE grid, where
+    # threshold(prob) == raw pre-morphology mask bit-exactly.
+    if save_prob:
+        paths = save_prob_outputs(prob_native, output_dir, image_name)
+        print(f"Confidence map saved to: {paths['npy'].name} / "
+              f"{paths['png8'].name}")
 
-    # Save results with timestamped filenames
-    image_name = Path(image_path).stem
+    # Optional TTA uncertainty channel (does not alter shipped outputs)
+    if tta_var and tta_var > 0:
+        variants = _tta_variants(tta_var)
+        probs = []
+        for fwd, inv in variants:
+            aug = fwd(native_input)
+            if use_sliding:
+                p, _ = segmenter.predict_large_image(
+                    np.ascontiguousarray(aug), apply_post_processing=False)
+            else:
+                p, _ = segmenter.predict(
+                    np.ascontiguousarray(aug), apply_post_processing=False)
+            probs.append(inv(p))
+        var = np.var(np.stack(probs, axis=0), axis=0).astype(np.float32)
+        vpaths = save_var_outputs(var, output_dir, image_name)
+        print(f"TTA variance ({len(variants)} passes) saved to: "
+              f"{vpaths['npy'].name}")
+
+    print("Inference complete!")
 
     # Generate timestamped filenames
     mask_filename = Config.get_result_filename(image_name, 'mask')
@@ -326,6 +409,9 @@ def inference_directory(
     model_path: str,
     output_dir: str,
     device: str = 'cuda',
+    save_prob: bool = True,
+    temperature: Optional[float] = None,
+    tta_var: int = 0,
 ):
     """
     Run inference on all images in a directory.
@@ -335,13 +421,20 @@ def inference_directory(
         model_path: Path to model checkpoint
         output_dir: Directory to save results
         device: Device to run on
+        save_prob / temperature / tta_var: see inference_single_image
     """
-    # Find all images
+    # Find all images. Skip GROUT's own derived outputs so re-running over a
+    # results folder (or input_dir == output_dir) does not feed exported
+    # _prob8/_var8/mask/overlay PNGs back into the model.
+    _derived_markers = ('_prob8_', '_var8_', '_mask_', '_overlay_',
+                        '_visualization_')
     image_exts = ['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff']
     image_files = []
     for ext in image_exts:
         image_files.extend(Path(input_dir).glob(f'*{ext}'))
         image_files.extend(Path(input_dir).glob(f'*{ext.upper()}'))
+    image_files = [p for p in image_files
+                   if not any(m in p.stem for m in _derived_markers)]
 
     if len(image_files) == 0:
         print(f"No images found in {input_dir}")
@@ -352,8 +445,8 @@ def inference_directory(
     # Create output directory
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    # Initialize segmenter
-    segmenter = GroutSegmenter(model_path, device)
+    # Initialize segmenter once and reuse
+    segmenter = GroutSegmenter(model_path, device, temperature=temperature)
 
     # Process each image
     for img_path in tqdm(image_files, desc="Processing images"):
@@ -364,6 +457,9 @@ def inference_directory(
                 output_dir,
                 device,
                 visualize=False,
+                save_prob=save_prob,
+                tta_var=tta_var,
+                segmenter=segmenter,
             )
         except Exception as e:
             print(f"Error processing {img_path}: {e}")
@@ -459,6 +555,20 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda',
                        choices=['cuda', 'cpu'], help='Device to run on')
 
+    # Soft output / calibration / uncertainty
+    parser.add_argument('--save-prob', dest='save_prob', action='store_true',
+                       default=True,
+                       help='Export pre-threshold confidence map '
+                            '(_prob.npy float32 + _prob8.png). Default: on')
+    parser.add_argument('--no-prob', dest='save_prob', action='store_false',
+                       help='Disable confidence-map export')
+    parser.add_argument('--temperature', type=float, default=None,
+                       help='Calibration temperature T (sigmoid(logits/T)). '
+                            'Default: calibration.json if present, else 1.0')
+    parser.add_argument('--tta-var', type=int, default=0, metavar='N',
+                       help='N flip/rot90 TTA passes -> per-pixel variance '
+                            'map (_var.npy + _var8.png). 0 = off')
+
     return parser.parse_args()
 
 
@@ -497,6 +607,9 @@ def main():
             args.model,
             args.output_dir,
             args.device,
+            save_prob=args.save_prob,
+            temperature=args.temperature,
+            tta_var=args.tta_var,
         )
 
     elif args.input_dir:
@@ -510,6 +623,9 @@ def main():
             args.model,
             args.output_dir,
             args.device,
+            save_prob=args.save_prob,
+            temperature=args.temperature,
+            tta_var=args.tta_var,
         )
 
     else:

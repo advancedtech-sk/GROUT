@@ -198,3 +198,65 @@ MIT License - see [LICENSE](LICENSE) file.
 - [Hugging Face Model](https://huggingface.co/advancedtech-sk/GROUT)
 - [GitHub Repository](https://github.com/advancedtech-sk/GROUT)
 - [ComfyUI custom node Repository](https://github.com/advancedtech-sk/ComfyUI-GROUT)
+
+## Confidence maps, calibration & fusion
+
+### Soft output (default ON)
+
+Every inference now also exports the pre-threshold confidence map next to
+the mask (disable with `--no-prob`):
+
+- `<name>_prob_<run>.npy` — canonical float32 in [0,1], **native inference
+  grid** (full resolution for sliding-window images; 512×512 for the resize
+  path)
+- `<name>_prob8_<run>.png` — 8-bit grayscale for viewing (quantized at
+  export only; all internal math is float32)
+
+**Pipeline order & invariant.** The shipped mask is produced as
+`sigmoid → threshold → post_process_grout (morphology) → [resize-path only:
+bilinear resize]`. Morphology and bilinear resize are not invertible from
+any probability map, so the exported map is taken at the sigmoid stage:
+**thresholding `_prob.npy` at `PREDICTION_THRESHOLD` reproduces the
+native-grid, pre-morphology binary mask bit-exactly** (golden-tested). The
+final shipped mask may differ from that raw mask by exactly the
+post-processing steps above.
+
+### Calibration hook
+
+```bash
+python calibrate.py --images real/images --masks real/masks \
+    --model checkpoints/grout_b3_zeroshot_v1.pth   # writes calibration.json
+python inference.py --image photo.jpg --temperature 1.7   # or automatic:
+# calibration.json next to the model (or cwd) is picked up automatically
+```
+
+Single-temperature scaling `sigmoid(logits/T)` fitted by pixel NLL (LBFGS).
+`T=1` is a no-op; any `T>0` preserves per-pixel ranking, so masks at the
+default threshold are unchanged unless T crosses probability 0.5 for some
+pixels. No calibration data → nothing changes.
+
+### Fusing with external probability maps
+
+```bash
+python fuse_probs.py grout_prob.npy mosaic_region_prob8.png --mode gate
+```
+
+`--mode` is required — pick by how the two maps relate:
+
+| mode | formula | use when |
+|---|---|---|
+| `gate` | `a·b` | conditional semantics: P(grout\|mosaic)·P(mosaic) |
+| `logit` | `σ(logit a + logit b − logit prior)` (`--prior` 0.5) | **independent** evidence sources |
+| `min` | `min(a,b)` | conservative choice for **correlated** maps |
+
+⚠ `gate`/`logit` assume the maps do **not** share image evidence — fusing
+two maps derived from the same image double-counts. Use `min` for
+correlated sources. Inputs: float `.npy` or 8/16-bit PNG; B is resampled to
+A's grid (bilinear; `--nearest` for label-like maps); fusion in float32,
+8-bit only at export. Library: `from fuse_probs import fuse_prob_maps`.
+
+### Uncertainty via TTA
+
+`--tta-var N` (N ≤ 8) runs N flip/rot90 passes and exports a per-pixel
+variance map `_var.npy` + `_var8.png` (scaled by the max Bernoulli variance
+0.25). Shipped masks are unchanged — the variance is an additional channel.
